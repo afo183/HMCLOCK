@@ -2,7 +2,7 @@
 
 ---
 
-![设备展示](./images/device.png)
+![设备展示](./images/hm213.jpg)
 
 ## 项目简介
 
