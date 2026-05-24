@@ -600,11 +600,6 @@ void get_holiday(void)
 	jieqi_str = NULL;
 	holiday_str = NULL;
 
-	i = jieqi(year, month, date);
-	if(i>=0){
-		jieqi_str = jieqi_name[i];
-	}
-
 	i = 0;
 	while(hday_info[i].mon){
 		int mon = hday_info[i].mon;
@@ -638,6 +633,78 @@ void get_holiday(void)
 			}
 		}
 		i += 1;
+	}
+
+	// --- 节气和节日倒计时（取最近的一个） ---
+	{
+		int i2, j, best_days = 9999;
+		char *best_name = NULL;
+		uint8_t d2m2[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
+		int is_leap2 = (year%4)? 0 : (year%100)? 1: (year%400)? 0: 1;
+		d2m2[1] += is_leap2;
+		int today_doy = date+1, year_days = 365 + is_leap2;
+		for(i2=0; i2<month; i2++) today_doy += d2m2[i2];
+
+		// 如果今天有节日，优先显示节日名（不显示倒计时）
+		if(holiday_str && holiday_str[0]){
+			// 已经有当天节日名了，holiday_str 保持不变
+		}
+
+		// 如果今天没节日，才找最近的节气或节日倒计时
+		if(!holiday_str || !holiday_str[0]){
+			// 遍历一年中每个日期，用 jieqi() 找出最近的节气
+			int check_m, check_d;
+			int chk_doy = today_doy;
+			int chk_year_days = year_days;
+			// 从今天开始往后查最多60天
+			for(j=1; j<=60; j++){
+				chk_doy += 1;
+				if(chk_doy > chk_year_days) chk_doy = 1;
+				// 把 chk_doy 转成月日
+				int tmp = chk_doy;
+				for(check_m=0; check_m<12; check_m++){
+					if(tmp <= d2m2[check_m]) break;
+					tmp -= d2m2[check_m];
+				}
+				check_d = tmp - 1; // 转 0-based
+				i2 = jieqi(year, check_m, check_d);
+				if(i2>=0){
+					best_days = j;
+					best_name = jieqi_name[i2];
+					break;
+				}
+			}
+			// 再算节日
+			i2 = 0;
+			while(hday_info[i2].mon){
+				int mon = hday_info[i2].mon, day = hday_info[i2].day, target_doy;
+				if(mon & 0x80){
+					int lm = mon & 0x7f; if(lm==0) lm=12;
+					target_doy = day;
+					for(j=0; j<lm-1; j++) target_doy += d2m2[j];
+				}else if(mon & 0x40){
+					target_doy = day;
+					for(j=0; j<11; j++) target_doy += d2m2[j];
+				}else{
+					target_doy = day;
+					for(j=0; j<mon-1; j++) target_doy += d2m2[j];
+				}
+				int diff = (target_doy > today_doy) ? (target_doy - today_doy) : (target_doy - today_doy + year_days);
+				if(diff < best_days && diff > 0){ best_days = diff; best_name = hday_info[i2].name; }
+				i2++;
+			}
+			if(best_name && best_days < 365){
+				static char hd_buf[16];
+				sprintf(hd_buf, "%d天后%s", best_days, best_name);
+				holiday_str = hd_buf;
+			}
+		}
+
+		// 如果节气刚好是今天，固定在节气位置显示
+		i2 = jieqi(year, month, date);
+		if(i2>=0){
+			jieqi_str = jieqi_name[i2];
+		}
 	}
 
 	return;
@@ -734,8 +801,8 @@ typedef struct {
 
 LAYOUT layouts[3] = {
 	{212, 104, 0, 1,
-		{15, 172, 190,  16,  12,  98, 150, 12},
-		{ 6,   7,  14,  27,  82,  82,  82, 44},
+		{15, 172, 190,  16,  12,  98, 126, 12},
+		{ 6,   7,  14,  3,  82,  82,  82, 44},
 	},
 	{250, 122, 2, 3,
 		{15, 206, 226,  12,  12, 118, 176, 15},
@@ -747,7 +814,7 @@ LAYOUT layouts[3] = {
 	},
 };
 
-int current_layout = 0;
+int current_layout = 1;
 
 void select_layout(int xres, int yres)
 {
@@ -863,6 +930,8 @@ void LB_draw()
 void clock_draw(int flags)
 {
 	char tbuf[64];
+	int dy, dm, dd, da, idx, leap;
+	int d2m[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
 	LAYOUT *lt = &layouts[current_layout];
 
 	if(ota_state){
@@ -878,6 +947,13 @@ void clock_draw(int flags)
 
 	// 显示电池电量
 	draw_batt(lt->x[2], lt->y[2]);
+	// 电池旁显示地支时辰（蓝牙广播时隐藏）
+	if(!(flags&DRAW_BT)){
+		select_font(lt->font_char);
+		static const char *dizhi[12] = {"子","丑","寅","卯","辰","巳","午","未","申","酉","戌","亥"};
+		int chen = ((hour + 1) / 2) % 12;
+		draw_text(lt->x[2]-18, lt->y[2]-8, dizhi[chen], BLACK);
+	}
 	if(flags&DRAW_BT){
 		// 显示蓝牙图标
 		draw_bt(lt->x[1], lt->y[1]);
@@ -920,11 +996,20 @@ void clock_draw(int flags)
 	draw_text(lt->x[0], lt->y[0], tbuf, BLACK);
 
 	// 显示农历日期(不显示年)
+	{
+		// 生肖（只显示生肖名，用"."代替"年"节省空间）
+		static const char *shengxiao[12] = {"鼠","牛","虎","兔","龙","蛇","马","羊","猴","鸡","狗","猪"};
+		int sx_idx = (year-4) % 12; if(sx_idx<0) sx_idx += 12;
+		char ybuf[6]; sprintf(ybuf, "%s.", shengxiao[sx_idx]);
+		select_font(lt->font_char);
+		draw_text(lt->x[4]-6, lt->y[4], ybuf, BLACK);
+	}
 	ldate_str(tbuf);
-	draw_text(lt->x[4], lt->y[4], tbuf, BLACK);
+	draw_text(lt->x[4]+14, lt->y[4], tbuf, BLACK);
 	// 显示节气
-	if(jieqi_str)
-		draw_text(lt->x[5], lt->y[5], jieqi_str, BLACK);
+	if(jieqi_str){
+		draw_text(lt->x[5]-2, lt->y[5], jieqi_str, BLACK);
+	}
 	// 显示节假日
 	if(flags&DRAW_BT){
 		draw_text(lt->x[6], lt->y[6], bt_id, BLACK);
